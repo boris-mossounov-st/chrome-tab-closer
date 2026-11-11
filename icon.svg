@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b82f6"/>
+      <stop offset="1" stop-color="#1d4ed8"/>
+    </linearGradient>
+  </defs>
+  <!-- inactive (background) tab -->
+  <path fill="#93c5fd" d="M76 46 L80 26 Q82 18 90 18 H108 Q116 18 118 26 L122 46 Z"/>
+  <!-- active tab (Chrome-style flared bottom) merged with the window body -->
+  <path fill="url(#g)" d="
+    M4 46 Q12 46 14 38 L17 24 Q19 14 30 14 H58 Q69 14 71 24 L74 38 Q76 46 84 46
+    H110 Q122 46 122 58 V106 Q122 118 110 118 H18 Q6 118 6 106 V46 Z"/>
+  <!-- clock face -->
+  <circle cx="64" cy="82" r="26" fill="#fff"/>
+  <path d="M64 82 V66 M64 82 L75 89" stroke="#1d4ed8" stroke-width="7" stroke-linecap="round" fill="none"/>
+  <circle cx="64" cy="82" r="4.5" fill="#1d4ed8"/>
+</svg>
