@@ -15,6 +15,19 @@ npm run build        # or: npm run dev  (rebuilds on every change)
 
 After a rebuild, click the reload icon on the extension's card. Changes to the settings page show up when you reopen it.
 
+## Releases
+
+`.github/workflows/release.yml` builds a zip of `dist/` with `manifest.json` at the zip root, the layout the Chrome Web Store expects.
+
+- **Push a version tag** to publish a GitHub Release with the zip attached:
+  ```sh
+  git tag v1.2.0 && git push origin v1.2.0
+  ```
+  The version in the tag becomes the built manifest's `version`, so you don't need to edit `public/manifest.json`. Chrome versions must be 1–4 dot-separated numbers, so tags like `v1.2.0-beta` are rejected.
+- **Run the workflow manually** (Actions → Release → Run workflow) to build the zip as a downloadable workflow artifact, without creating a release.
+
+To install from a release zip, unzip it, then use **Load unpacked** on the unzipped folder.
+
 ## Rules
 
 Each rule has:

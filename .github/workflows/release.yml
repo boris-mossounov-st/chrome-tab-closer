@@ -1,0 +1,74 @@
+name: Release
+
+# Push a tag like v1.2.0 -> builds the extension and publishes a GitHub Release with the zip.
+# Run manually (Actions tab -> Release -> Run workflow) -> builds the zip as a workflow artifact only.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to create releases
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Set extension version
+        id: version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+            # Chrome requires 1-4 dot-separated integers (0-65535), e.g. 1.2.0
+            if ! [[ "$VERSION" =~ ^[0-9]+(\.[0-9]+){0,3}$ ]]; then
+              echo "::error::Tag '$GITHUB_REF_NAME' is not a valid Chrome extension version (expected e.g. v1.2.0)"
+              exit 1
+            fi
+            # Stamp the tag's version into the built manifest
+            node -e '
+              const fs = require("fs");
+              const f = "dist/manifest.json";
+              const m = JSON.parse(fs.readFileSync(f, "utf8"));
+              m.version = process.argv[1];
+              fs.writeFileSync(f, JSON.stringify(m, null, 2) + "\n");
+            ' "$VERSION"
+          else
+            VERSION="$(node -p 'require("./dist/manifest.json").version')-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "zip=tab-closer-$VERSION.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Zip extension
+        # manifest.json must be at the root of the zip (Chrome Web Store requirement)
+        run: cd dist && zip -r -X "../${{ steps.version.outputs.zip }}" .
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.version.outputs.zip }}
+          path: ${{ steps.version.outputs.zip }}
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" "${{ steps.version.outputs.zip }}" \
+            --title "Tab Closer $GITHUB_REF_NAME" \
+            --generate-notes \
+            --verify-tag
