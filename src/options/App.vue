@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, watch, onMounted, onUnmounted } from 'vue';
+import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import RuleCard from './RuleCard.vue';
 import {
   DEFAULT_RULES, loadSettings, saveSettings, findRule, ruleMatchesUrl, timeoutMs, closeTabs, newId,
@@ -15,6 +15,8 @@ const focusedTabId = ref(null);
 const closedLog = ref([]);
 const testUrl = ref('');
 const now = ref(Date.now());
+const search = ref('');
+const rulesEl = ref(null);
 
 // ---------- Load / autosave ----------
 
@@ -108,10 +110,31 @@ const stats = computed(() => {
   return result;
 });
 
+// ---------- Search ----------
+
+const searching = computed(() => search.value.trim() !== '');
+
+/** Rules to show, with their index in the full list (so move/delete act on the right rule). */
+const visibleRules = computed(() => {
+  const rules = settings.value?.rules || [];
+  const q = search.value.trim().toLowerCase();
+  return rules
+    .map((rule, index) => ({ rule, index }))
+    .filter(({ rule }) => !q
+      || (rule.title || '').toLowerCase().includes(q)
+      || (rule.patterns || []).some((p) => p.toLowerCase().includes(q)));
+});
+
 // ---------- Actions ----------
 
-function addRule() {
+async function addRule() {
+  search.value = ''; // make sure the new rule is visible
   settings.value.rules.push({ id: newId(), enabled: true, title: '', patterns: [''], timeoutMinutes: 10 });
+  await nextTick();
+  const cards = rulesEl.value?.querySelectorAll('article');
+  const card = cards?.[cards.length - 1];
+  card?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  card?.querySelector('input[type=text]')?.focus({ preventScroll: true });
 }
 
 function removeRule(index) {
@@ -136,6 +159,10 @@ async function closeAll(rule) {
   refreshTabs();
 }
 
+function reopen(entry) {
+  chrome.tabs.create({ url: entry.url, active: true });
+}
+
 function openFullPage() {
   chrome.runtime.openOptionsPage();
   window.close();
@@ -154,45 +181,53 @@ const fmtTime = (t) => new Date(t).toLocaleString();
 </script>
 
 <template>
-  <div v-if="settings" class="mx-auto max-w-3xl" :class="isPopup ? 'p-3' : 'px-4 py-6'">
-    <header class="flex items-start justify-between gap-3">
-      <div>
+  <div v-if="settings" class="mx-auto max-w-3xl" :class="isPopup ? 'px-3 pb-3' : 'px-4 pb-6'">
+    <!-- Sticky toolbar: always visible while scrolling through rules -->
+    <header
+      class="sticky top-0 z-10 border-b border-slate-200 bg-white/90 backdrop-blur dark:border-slate-800 dark:bg-slate-950/90"
+      :class="isPopup ? '-mx-3 px-3 py-2' : '-mx-4 px-4 pt-6 pb-3'"
+    >
+      <div class="flex items-center gap-3">
         <h1 class="text-lg font-bold">Tab Closer</h1>
-        <p v-if="!isPopup" class="hint mt-1">
-          Closes tabs matching a rule after they've been inactive for the rule's timeout.
-          A tab is active while it's the selected tab in the focused Chrome window; loading a new URL
-          restarts its timer. The tab you're looking at is never closed.
-        </p>
+        <span class="hint text-xs">{{ status }}</span>
+        <button
+          v-if="isPopup"
+          class="ml-auto whitespace-nowrap text-blue-600 hover:underline dark:text-blue-400"
+          @click="openFullPage"
+        >
+          Full page ↗
+        </button>
       </div>
-      <button
-        v-if="isPopup"
-        class="whitespace-nowrap text-blue-600 hover:underline dark:text-blue-400"
-        @click="openFullPage"
-      >
-        Full page ↗
-      </button>
+      <div class="mt-2 flex items-center gap-2">
+        <div class="relative min-w-0 flex-1">
+          <input
+            v-model="search"
+            type="search"
+            placeholder="Search title or pattern…"
+            class="field w-full pl-7"
+            @keydown.esc="search = ''"
+          >
+          <svg
+            class="hint pointer-events-none absolute top-1/2 left-2 size-4 -translate-y-1/2"
+            viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <circle cx="8.5" cy="8.5" r="5.5" />
+            <path d="m13 13 4 4" />
+          </svg>
+        </div>
+        <button class="btn btn-primary whitespace-nowrap" @click="addRule">+ Add rule</button>
+        <button class="btn whitespace-nowrap" title="Replace all rules with the defaults" @click="restoreDefaults">
+          Restore defaults
+        </button>
+      </div>
     </header>
 
-    <section class="mt-3 flex flex-col gap-2.5">
-      <RuleCard
-        v-for="(rule, i) in settings.rules"
-        :key="rule.id"
-        :rule="rule"
-        :stats="stats[rule.id]"
-        :first="i === 0"
-        :last="i === settings.rules.length - 1"
-        @remove="removeRule(i)"
-        @move="(d) => moveRule(i, d)"
-        @close-all="closeAll(rule)"
-      />
-      <p v-if="!settings.rules.length" class="hint">No rules yet.</p>
-    </section>
-
-    <div class="mt-3 flex flex-wrap items-center gap-2">
-      <button class="btn btn-primary" @click="addRule">+ Add rule</button>
-      <button class="btn" @click="restoreDefaults">Restore defaults</button>
-      <span class="hint ml-auto text-xs">{{ status }}</span>
-    </div>
+    <p v-if="!isPopup" class="hint mt-3">
+      Closes tabs matching a rule after they've been inactive for the rule's timeout.
+      A tab is active while it's the selected tab in the focused Chrome window; loading a new URL
+      restarts its timer. The tab you're looking at is never closed.
+    </p>
 
     <p class="hint mt-3 text-xs leading-relaxed">
       Patterns: one per line. <code>/regex/</code> (optionally with flags, e.g. <code>/zoom\.us/i</code>) is tested
@@ -200,13 +235,34 @@ const fmtTime = (t) => new Date(t).toLocaleString();
       enabled one decides its timeout.
     </p>
 
-    <section class="mt-3 space-y-1">
+    <section class="mt-2 flex flex-wrap gap-x-5 gap-y-1">
       <label class="flex items-center gap-2">
         <input v-model="settings.skipPinned" type="checkbox" class="size-4 accent-blue-600"> Never auto-close pinned tabs
       </label>
       <label class="flex items-center gap-2">
         <input v-model="settings.skipAudible" type="checkbox" class="size-4 accent-blue-600"> Never auto-close tabs playing audio
       </label>
+    </section>
+
+    <p v-if="searching" class="hint mt-3 text-xs">
+      Showing {{ visibleRules.length }} of {{ settings.rules.length }} rules · reordering is disabled while searching ·
+      <button class="text-blue-600 hover:underline dark:text-blue-400" @click="search = ''">clear</button>
+    </p>
+
+    <section ref="rulesEl" class="mt-3 flex flex-col gap-2.5">
+      <RuleCard
+        v-for="{ rule, index } in visibleRules"
+        :key="rule.id"
+        :rule="rule"
+        :stats="stats[rule.id]"
+        :first="searching || index === 0"
+        :last="searching || index === settings.rules.length - 1"
+        @remove="removeRule(index)"
+        @move="(d) => moveRule(index, d)"
+        @close-all="closeAll(rule)"
+      />
+      <p v-if="!settings.rules.length" class="hint">No rules yet.</p>
+      <p v-else-if="!visibleRules.length" class="hint">No rules match “{{ search }}”.</p>
     </section>
 
     <template v-if="!isPopup">
@@ -224,7 +280,14 @@ const fmtTime = (t) => new Date(t).toLocaleString();
         <tbody class="divide-y divide-slate-200 dark:divide-slate-800">
           <tr v-for="(e, i) in closedLog" :key="i">
             <td class="hint w-44 py-1.5 pr-2 align-top whitespace-nowrap">{{ fmtTime(e.time) }}</td>
-            <td class="truncate py-1.5 pr-2" :title="e.url">{{ e.title || e.url }}</td>
+            <td class="truncate py-1.5 pr-2">
+              <a
+                :href="e.url"
+                :title="`Reopen ${e.url}\n(it still matches its rule, so it will auto-close again after the timeout)`"
+                class="text-blue-600 hover:underline dark:text-blue-400"
+                @click.prevent="reopen(e)"
+              >{{ e.title || e.url }}</a>
+            </td>
             <td class="hint w-56 truncate py-1.5">{{ e.rule }}</td>
           </tr>
         </tbody>
