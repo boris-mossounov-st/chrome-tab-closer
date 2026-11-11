@@ -130,9 +130,67 @@ chrome.runtime.onInstalled.addListener(async () => {
   if (!(await hasStoredSettings())) await saveSettings(await loadSettings());
 });
 
+// ---- Flash: make matching tabs blink in the tab strip ----
+//
+// Extensions can't recolor tabs directly, but they can put tabs in colored tab groups.
+// Each ungrouped target tab gets its own temporary single-tab group (single-tab groups
+// don't move the tab), whose color blinks; afterwards the tab is ungrouped again.
+// Tabs already in a group get that group's color blinked and then restored.
+// Pinned tabs can't be grouped and are skipped.
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const FLASH_COLORS = ['yellow', 'red'];
+const FLASH_STEPS = 8;        // color changes
+const FLASH_STEP_MS = 350;
+let flashing = false;
+
+async function flashTabs(tabIds) {
+  if (flashing || !tabIds?.length) return { ok: true, flashed: 0 };
+  flashing = true;
+  const tempGroupTabs = [];   // tab ids we grouped ourselves
+  const groups = new Map();   // groupId -> original { color, title, collapsed } (null = our temp group)
+  try {
+    const tabs = (await Promise.all(tabIds.map((id) => chrome.tabs.get(id).catch(() => null))))
+      .filter((t) => t && !t.pinned);
+
+    for (const tab of tabs) {
+      if (tab.groupId !== chrome.tabGroups.TAB_GROUP_ID_NONE) {
+        if (!groups.has(tab.groupId)) {
+          const g = await chrome.tabGroups.get(tab.groupId);
+          groups.set(tab.groupId, { color: g.color, title: g.title, collapsed: g.collapsed });
+          if (g.collapsed) await chrome.tabGroups.update(tab.groupId, { collapsed: false });
+        }
+      } else {
+        const groupId = await chrome.tabs.group({ tabIds: tab.id, createProperties: { windowId: tab.windowId } });
+        await chrome.tabGroups.update(groupId, { title: '⚡' });
+        tempGroupTabs.push(tab.id);
+        groups.set(groupId, null);
+      }
+    }
+
+    for (let i = 0; i < FLASH_STEPS; i++) {
+      const color = FLASH_COLORS[i % FLASH_COLORS.length];
+      await Promise.all([...groups.keys()].map((id) => chrome.tabGroups.update(id, { color }).catch(() => {})));
+      await sleep(FLASH_STEP_MS);
+    }
+    return { ok: true, flashed: tabs.length };
+  } finally {
+    if (tempGroupTabs.length) await chrome.tabs.ungroup(tempGroupTabs).catch(() => {});
+    await Promise.all([...groups].filter(([, orig]) => orig)
+      .map(([id, orig]) => chrome.tabGroups.update(id, orig).catch(() => {})));
+    flashing = false;
+  }
+}
+
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'sweep-now') {
     sweep().then(() => sendResponse({ ok: true }));
     return true; // async response
+  }
+  if (msg?.type === 'flash-tabs') {
+    flashTabs(msg.tabIds)
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
   }
 });

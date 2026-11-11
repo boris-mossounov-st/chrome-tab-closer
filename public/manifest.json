@@ -12,7 +12,8 @@
   "permissions": [
     "tabs",
     "alarms",
-    "storage"
+    "storage",
+    "tabGroups"
   ],
   "background": {
     "service_worker": "background.js",

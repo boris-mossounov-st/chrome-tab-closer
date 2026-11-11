@@ -8,7 +8,7 @@ const props = defineProps({
   first: Boolean,
   last: Boolean,
 });
-defineEmits(['remove', 'move', 'close-all']);
+defineEmits(['remove', 'move', 'close-all', 'flash']);
 
 // Textarea <-> patterns array (raw lines are kept so typing new lines works; empty lines are ignored when matching).
 const patternsText = computed({
@@ -77,9 +77,19 @@ function fmtDuration(ms) {
           · next auto-close in {{ fmtDuration(stats.nextCloseMs) }}
         </template>
       </span>
-      <button class="btn" :disabled="!count" @click="$emit('close-all')">
-        Close all{{ count ? ` (${count})` : '' }}
-      </button>
+      <span class="flex shrink-0 gap-1.5">
+        <button
+          class="btn"
+          :disabled="!count"
+          title="Blink the matching tabs in the tab strip (pinned tabs are skipped)"
+          @click="$emit('flash')"
+        >
+          Flash
+        </button>
+        <button class="btn" :disabled="!count" @click="$emit('close-all')">
+          Close all{{ count ? ` (${count})` : '' }}
+        </button>
+      </span>
     </div>
   </article>
 </template>

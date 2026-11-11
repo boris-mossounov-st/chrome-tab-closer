@@ -159,6 +159,20 @@ async function closeAll(rule) {
   refreshTabs();
 }
 
+async function flash(rule) {
+  const tabIds = (stats.value[rule.id]?.tabs || []).map((t) => t.id);
+  // Runs in the background worker so it completes even if the popup closes.
+  let res;
+  try {
+    res = await chrome.runtime.sendMessage({ type: 'flash-tabs', tabIds });
+  } catch (e) {
+    res = { ok: false, error: e.message };
+  }
+  if (!res) status.value = '⚠ Background is outdated — reload the extension in chrome://extensions';
+  else if (!res.ok) status.value = `⚠ Flash failed: ${res.error}`;
+  else if (!res.flashed) status.value = 'Nothing to flash (pinned tabs can’t be flashed)';
+}
+
 function reopen(entry) {
   chrome.tabs.create({ url: entry.url, active: true });
 }
@@ -260,6 +274,7 @@ const fmtTime = (t) => new Date(t).toLocaleString();
         @remove="removeRule(index)"
         @move="(d) => moveRule(index, d)"
         @close-all="closeAll(rule)"
+        @flash="flash(rule)"
       />
       <p v-if="!settings.rules.length" class="hint">No rules yet.</p>
       <p v-else-if="!visibleRules.length" class="hint">No rules match “{{ search }}”.</p>
