@@ -1,12 +1,21 @@
 // Shared between the background service worker and the settings page.
 //
 // Rules are stored in chrome.storage.sync (built-in browser storage, synced with your
-// Chrome profile). DEFAULT_RULES below is only used to seed storage on first install
-// and by the "Restore defaults" button.
+// Chrome profile). DEFAULT_RULES below is only used to seed storage on first install,
+// to add newly introduced defaults on update (see `addedIn`), and by "Restore defaults".
 //
-// Rule shape: { id, enabled, title, patterns: string[], timeoutMinutes }
+// Rule shape: { id, enabled, title, patterns: string[], timeoutMinutes, check? }
 // Pattern syntax: "/regex/flags" -> regular expression tested against the full URL,
 //                 anything else  -> exact URL match.
+//
+// Optional page check: check = { selector, text, sites }
+//   The tab only qualifies if the page has an element matching `selector` (CSS) whose
+//   visible text contains `text` (plain substring, or "/regex/flags"); either may be empty.
+//   `sites` lists the hosts the extension may read ("github.com, *.awsapps.com") — access
+//   is granted per site from the settings page. Pages that can't be read are kept open.
+
+/** Bump when adding default rules; rules with `addedIn` > the user's stored version get added on update. */
+export const DEFAULTS_VERSION = 2;
 
 export const DEFAULT_RULES = [
   {
@@ -19,15 +28,24 @@ export const DEFAULT_RULES = [
     timeoutMinutes: 1,
   },
   {
+    id: 'aws-cli-approved',
+    addedIn: 2,
+    enabled: true,
+    title: 'AWS CLI login approved',
+    // Pages left behind by `aws sso login`, closed only once they say "Request approved".
+    patterns: [
+      '/^https:\\/\\/[\\w-]+\\.awsapps\\.com\\/start\\//',
+      '/^http:\\/\\/(127\\.0\\.0\\.1|localhost):\\d+\\/oauth\\/callback/',
+    ],
+    check: { selector: 'body', text: 'Request approved', sites: '*.awsapps.com, 127.0.0.1, localhost' },
+    timeoutMinutes: 1,
+  },
+  {
     id: 'aws',
     enabled: true,
-    title: 'AWS sign-in / SSO',
-    patterns: [
-      // e.g. https://us-east-1.signin.aws/platform/d-.../login?...
-      '/^https:\\/\\/([\\w-]+\\.)*signin\\.aws(\\.amazon\\.com)?\\//',
-      // page opened by `aws sso login`
-      '/^https:\\/\\/[\\w-]+\\.awsapps\\.com\\/start\\/?#\\/device/',
-    ],
+    title: 'AWS sign-in',
+    // e.g. https://us-east-1.signin.aws/platform/d-.../login?...
+    patterns: ['/^https:\\/\\/([\\w-]+\\.)*signin\\.aws(\\.amazon\\.com)?\\//'],
     timeoutMinutes: 5,
   },
   {
@@ -37,10 +55,26 @@ export const DEFAULT_RULES = [
     patterns: ['/^https:\\/\\/docs\\.google\\.com\\/(document|spreadsheets|presentation)\\//'],
     timeoutMinutes: 60,
   },
+  {
+    id: 'github-done',
+    addedIn: 2,
+    enabled: true,
+    title: 'GitHub closed issues / merged PRs',
+    patterns: ['/^https:\\/\\/github\\.com\\/[^/]+\\/[^/]+\\/(issues|pull)\\/\\d+/'],
+    // The item's own state badge in the (sticky) header. Linked issues/PRs elsewhere on the
+    // page use different markup, so they don't trigger this.
+    check: {
+      selector: '[data-component="StateLabel"]:is([data-status^="issueClosed"], [data-status="pullMerged"], [data-status="pullClosed"])',
+      text: '',
+      sites: 'github.com',
+    },
+    timeoutMinutes: 30,
+  },
 ];
 
 export const DEFAULT_SETTINGS = {
-  rules: DEFAULT_RULES,
+  rules: DEFAULT_RULES.map(({ addedIn, ...r }) => r),
+  defaultsVersion: DEFAULTS_VERSION,
   skipPinned: true,   // never auto-close pinned tabs
   skipAudible: true,  // never auto-close tabs playing audio (e.g. a meeting in the browser)
 };
@@ -62,6 +96,9 @@ function migrateRule(r) {
   };
 }
 
+/** Fresh copy of the default rules (without internal fields). */
+export const defaultRules = () => structuredClone(DEFAULT_SETTINGS.rules);
+
 export async function hasStoredSettings() {
   const { settings } = await chrome.storage.sync.get('settings');
   return !!settings;
@@ -70,8 +107,26 @@ export async function hasStoredSettings() {
 export async function loadSettings() {
   const { settings } = await chrome.storage.sync.get('settings');
   const merged = { ...structuredClone(DEFAULT_SETTINGS), ...(settings || {}) };
+  // Settings saved before defaults were versioned count as version 1.
+  if (settings && settings.defaultsVersion == null) merged.defaultsVersion = 1;
   merged.rules = merged.rules.map(migrateRule);
   return merged;
+}
+
+/**
+ * Inserts default rules introduced after the user's `defaultsVersion` (at their default
+ * position), without touching existing rules. Returns true if anything changed.
+ */
+export function addNewDefaults(settings) {
+  const from = settings.defaultsVersion ?? 1;
+  if (from >= DEFAULTS_VERSION) return false;
+  DEFAULT_RULES.forEach(({ addedIn = 1, ...rule }, index) => {
+    if (addedIn > from && !settings.rules.some((r) => r.id === rule.id)) {
+      settings.rules.splice(Math.min(index, settings.rules.length), 0, structuredClone(rule));
+    }
+  });
+  settings.defaultsVersion = DEFAULTS_VERSION;
+  return true;
 }
 
 export async function saveSettings(settings) {
@@ -118,6 +173,33 @@ export function timeoutMs(rule) {
   return n > 0 ? n * 60_000 : Infinity;
 }
 
+// ---------- Page check ----------
+
+/** Does the rule have a page check (selector and/or text)? */
+export function hasCheck(rule) {
+  return !!(rule.check && (rule.check.selector?.trim() || rule.check.text?.trim()));
+}
+
+/** "github.com, https://*.example.com/x" -> ['github.com', '*.example.com'] */
+export function parseSites(sites) {
+  return (sites || '')
+    .split(/[\s,]+/)
+    .map((s) => s.replace(/^[a-z*]+:\/\//i, '').replace(/[/:].*$/, '').toLowerCase())
+    .filter(Boolean);
+}
+
+/** Host permission patterns for a rule's sites (any scheme, any port, any path). */
+export function siteOrigins(rule) {
+  return parseSites(rule.check?.sites).map((host) => `*://${host}/*`);
+}
+
+/** Does a hostname fall under one of the sites ("*.example.com" also matches "example.com")? */
+export function hostCovered(host, sites) {
+  return parseSites(sites).some((site) => (site.startsWith('*.')
+    ? host === site.slice(2) || host.endsWith(site.slice(1))
+    : host === site));
+}
+
 /** List of human-readable problems with a rule (empty if fine). */
 export function ruleErrors(rule) {
   const errors = [];
@@ -127,6 +209,11 @@ export function ruleErrors(rule) {
   });
   if (!(rule.patterns || []).some((l) => l.trim())) errors.push('No patterns — rule matches nothing');
   if (!(Number(rule.timeoutMinutes) > 0)) errors.push('Timeout must be greater than 0');
+  if (hasCheck(rule)) {
+    const t = parsePattern(rule.check.text);
+    if (t.error) errors.push(`Page check text: invalid regex — ${t.error}`);
+    if (!parseSites(rule.check.sites).length) errors.push('Page check needs at least one site to read');
+  }
   return errors;
 }
 

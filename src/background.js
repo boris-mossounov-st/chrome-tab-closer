@@ -1,5 +1,6 @@
 import {
-  loadSettings, saveSettings, hasStoredSettings, findRule, timeoutMs, closeTabs,
+  loadSettings, saveSettings, hasStoredSettings, addNewDefaults,
+  ruleMatchesUrl, hasCheck, timeoutMs, closeTabs,
 } from './common.js';
 
 // "Activity" = last time a tab was focused (active tab of the focused window)
@@ -48,6 +49,99 @@ async function refreshFocus() {
   return current;
 }
 
+/**
+ * Which rule (if any) closes this tab now. Enabled rules matching the URL are tried in order:
+ * - a rule without a page check owns the tab: it closes it once idle past its timeout,
+ *   and later rules are not considered;
+ * - a rule with a page check only claims the tab when it's idle past the timeout AND the
+ *   page check passes; otherwise the next matching rule gets a chance.
+ */
+async function ruleToClose(rules, tab, url, idleMs) {
+  for (const rule of rules) {
+    if (!rule.enabled || !ruleMatchesUrl(rule, url)) continue;
+    const due = idleMs >= timeoutMs(rule);
+    if (!hasCheck(rule)) return due ? rule : null;
+    if (due && await pageCheckPasses(tab, rule.check)) return rule;
+  }
+  return null;
+}
+
+// ---- Page check ----
+
+/**
+ * Runs inside the page (must be self-contained). Returns { pass, match? }: pass is true if an
+ * element matches `selector` and — when `text` is given — its visible text contains `text` or
+ * matches "/regex/flags". `match` is a short snippet of the first passing element, so the
+ * settings UI can show why a tab passed.
+ */
+function pageProbe(selector, text) {
+  let els;
+  try { els = [...document.querySelectorAll(selector || 'body')]; } catch { return { pass: false }; }
+  let test = () => true;
+  if (text) {
+    const m = text.match(/^\/(.+)\/([dimsuv]*)$/);
+    if (m) {
+      let re;
+      try { re = new RegExp(m[1], m[2]); } catch { return { pass: false }; }
+      test = (s) => re.test(s);
+    } else test = (s) => s.includes(text);
+  }
+  const el = els.find((e) => test(e.innerText ?? e.textContent ?? ''));
+  if (!el) return { pass: false };
+  const attrs = [...el.attributes]
+    .filter((a) => a.name !== 'style' && !(a.name === 'class' && a.value.length > 60))
+    .map((a) => `${a.name}="${a.value.slice(0, 60)}"`).join(' ');
+  const inner = (el.innerText ?? '').replace(/\s+/g, ' ').trim().slice(0, 40);
+  return { pass: true, match: `<${el.tagName.toLowerCase()} ${attrs}>${inner}` };
+}
+
+/**
+ * Runs the page check in a tab -> { result: true|false } or { result: null, reason } when the
+ * page can't be read (no site access, unloaded/discarded tab, still loading, chrome:// page...).
+ */
+async function pageCheck(tab, check) {
+  if (tab.discarded) return { result: null, reason: 'unloaded' };
+  if (tab.status !== 'complete') return { result: null, reason: 'loading' };
+  try {
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      func: pageProbe,
+      args: [check.selector?.trim() || '', check.text?.trim() || ''],
+    });
+    return { result: res?.result?.pass === true, match: res?.result?.match };
+  } catch (e) {
+    return { result: null, reason: /permission|cannot access/i.test(e.message) ? 'no access' : e.message };
+  }
+}
+
+const pageCheckPasses = async (tab, check) => (await pageCheck(tab, check)).result === true;
+
+/** For the settings UI: page-check result per tab id, using the (possibly unsaved) check. */
+async function checkTabs(check, tabIds) {
+  const results = {};
+  await Promise.all(tabIds.map(async (id) => {
+    const tab = await chrome.tabs.get(id).catch(() => null);
+    if (tab) results[id] = await pageCheck(tab, check);
+  }));
+  return { ok: true, results };
+}
+
+/** "Close all" for one rule: closes matching tabs (only those passing the page check, if any). */
+async function closeRuleTabs(ruleId) {
+  const settings = await loadSettings();
+  const rule = settings.rules.find((r) => r.id === ruleId);
+  if (!rule) return { ok: false, error: 'Rule not found (still saving?)' };
+  const tabs = (await chrome.tabs.query({})).filter((t) => ruleMatchesUrl(rule, t.url || t.pendingUrl));
+  const toClose = [];
+  for (const tab of tabs) {
+    if (!hasCheck(rule) || await pageCheckPasses(tab, rule.check)) {
+      toClose.push({ tab, reason: `${rule.title || 'Untitled rule'} (closed manually)` });
+    }
+  }
+  await closeTabs(toClose);
+  return { ok: true, closed: toClose.length, kept: tabs.length - toClose.length };
+}
+
 async function sweep() {
   await ready;
   const settings = await loadSettings();
@@ -70,12 +164,8 @@ async function sweep() {
 
     const url = tab.url || tab.pendingUrl;
     if (!url) continue;
-    const rule = findRule(settings.rules, url);
-    if (!rule) continue;
-
-    if (now - activity[tab.id] >= timeoutMs(rule)) {
-      toClose.push({ tab, reason: rule.title || 'Untitled rule' });
-    }
+    const rule = await ruleToClose(settings.rules, tab, url, now - activity[tab.id]);
+    if (rule) toClose.push({ tab, reason: rule.title || 'Untitled rule' });
   }
 
   // Forget tabs that no longer exist.
@@ -125,9 +215,12 @@ chrome.tabs.onRemoved.addListener(async (tabId) => {
   await persist();
 });
 
-// Store the default rules on first install so they live in browser storage, not code.
+// First install: store the default rules so they live in browser storage, not code.
+// Update/reload: add default rules introduced since the user's settings were saved.
 chrome.runtime.onInstalled.addListener(async () => {
-  if (!(await hasStoredSettings())) await saveSettings(await loadSettings());
+  const settings = await loadSettings();
+  const fresh = !(await hasStoredSettings());
+  if (addNewDefaults(settings) || fresh) await saveSettings(settings);
 });
 
 // ---- Flash: make matching tabs blink in the tab strip ----
@@ -186,6 +279,18 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   if (msg?.type === 'sweep-now') {
     sweep().then(() => sendResponse({ ok: true }));
     return true; // async response
+  }
+  if (msg?.type === 'check-tabs') {
+    checkTabs(msg.check, msg.tabIds)
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
+  }
+  if (msg?.type === 'close-rule') {
+    closeRuleTabs(msg.ruleId)
+      .then(sendResponse)
+      .catch((e) => sendResponse({ ok: false, error: String(e?.message || e) }));
+    return true;
   }
   if (msg?.type === 'flash-tabs') {
     flashTabs(msg.tabIds)

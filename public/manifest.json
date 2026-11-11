@@ -13,7 +13,11 @@
     "tabs",
     "alarms",
     "storage",
-    "tabGroups"
+    "tabGroups",
+    "scripting"
+  ],
+  "optional_host_permissions": [
+    "*://*/*"
   ],
   "background": {
     "service_worker": "background.js",

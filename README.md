@@ -38,15 +38,38 @@ Each rule has:
   - anything else must equal the URL exactly
 - **Timeout** in minutes of inactivity
 - An **on/off** switch
+- An optional **page check** (see below)
 
-Each rule card also shows a live **count of open tabs** that match the rule and a **Close all** button. Close all closes those tabs right away, even if the rule is off. Edits save automatically.
+Each rule card also shows a live **count of open tabs** that match the rule, plus two buttons:
 
-Rules are kept in `chrome.storage.sync`, Chrome's built-in extension storage, which syncs with your Chrome profile. The defaults in `src/common.js` are written to storage only on first install or when you click **Restore defaults**.
+- **Flash** makes those tabs blink in the tab strip.
+- **Close all** closes them right away, even if the rule is off. For a rule with a page check, only tabs that pass the check are closed.
+
+Edits save automatically.
+
+Rules are kept in `chrome.storage.sync`, Chrome's built-in extension storage, which syncs with your Chrome profile. The defaults in `src/common.js` are written to storage on first install and when you click **Restore defaults**. When an update adds new default rules, they're inserted into your saved rules; your existing rules aren't changed.
+
+### Page checks
+
+A page check makes a rule close a tab only if the page contains certain content:
+
+- **Selector:** a CSS selector the page must contain. If it's empty, `body` is used.
+- **Text** (optional): the matching element's visible text must contain this text, or match it if you write `/regex/`.
+- **Sites:** the hosts the extension may read, e.g. `github.com, *.awsapps.com`. Access is granted per site with **Grant access** on the card, and Chrome asks you to confirm. You can revoke a site with the ✕ on its chip.
+
+If a page can't be read, the tab stays open. That happens when the site has no access granted, when Chrome has unloaded the tab, or when the page is still loading. The check runs only for tabs that have already passed their timeout. If it fails, the next matching rule gets a chance.
+
+Default rules that use page checks:
+
+| Rule | Selector / text | Sites |
+|---|---|---|
+| GitHub closed issues / merged PRs | `[data-component="StateLabel"]:is([data-status^="issueClosed"], [data-status="pullMerged"], [data-status="pullClosed"])`: the item's own state badge in the header. Linked issues and PRs elsewhere on the page don't match. | `github.com` |
+| AWS CLI login approved | `body` containing `Request approved` | `*.awsapps.com, 127.0.0.1, localhost` |
 
 ## Auto-close behaviour
 
 - A tab's inactivity timer resets when the tab becomes the selected tab in the focused Chrome window, or when it loads a new URL.
-- About every 30 seconds, each tab is matched against the rules. The first enabled matching rule decides the timeout.
+- About every 30 seconds, each tab is matched against the rules. The first enabled matching rule without a page check decides the timeout. A rule with a page check applies only when its check passes.
 - The tab you're looking at is never closed. If you switch to another app (for example, the Zoom app opens), the timer starts.
 - Pinned tabs and tabs playing audio are skipped by default.
 - If the browser restarts, all timers start over.

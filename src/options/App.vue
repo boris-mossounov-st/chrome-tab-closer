@@ -2,7 +2,7 @@
 import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import RuleCard from './RuleCard.vue';
 import {
-  DEFAULT_RULES, loadSettings, saveSettings, findRule, ruleMatchesUrl, timeoutMs, closeTabs, newId,
+  defaultRules, loadSettings, saveSettings, findRule, ruleMatchesUrl, timeoutMs, newId, hasCheck,
 } from '../common.js';
 
 defineProps({ isPopup: Boolean });
@@ -23,16 +23,20 @@ const rulesEl = ref(null);
 let lastSavedJson = '';
 let saveTimer;
 
+async function flushSave() {
+  clearTimeout(saveTimer);
+  const json = JSON.stringify(settings.value);
+  if (!settings.value || json === lastSavedJson) return;
+  lastSavedJson = json;
+  await saveSettings(JSON.parse(json));
+  status.value = 'All changes saved';
+}
+
 watch(settings, (value) => {
-  const json = JSON.stringify(value);
-  if (!value || json === lastSavedJson) return;
+  if (!value || JSON.stringify(value) === lastSavedJson) return;
   status.value = 'Saving…';
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(async () => {
-    lastSavedJson = json;
-    await saveSettings(JSON.parse(json));
-    status.value = 'All changes saved';
-  }, 400);
+  saveTimer = setTimeout(flushSave, 400);
 }, { deep: true });
 
 function onStorageChanged(changes, area) {
@@ -63,6 +67,7 @@ async function refreshTabs() {
 
 const tabEvents = ['onCreated', 'onRemoved', 'onUpdated'];
 let ticker;
+let checkTicker;
 
 onMounted(async () => {
   const s = await loadSettings();
@@ -73,12 +78,19 @@ onMounted(async () => {
   chrome.storage.onChanged.addListener(onStorageChanged);
   tabEvents.forEach((e) => chrome.tabs[e].addListener(refreshTabs));
   ticker = setInterval(refreshTabs, 2000);
+  refreshChecks();
+  checkTicker = setInterval(refreshChecks, 5000);
+  chrome.permissions.onAdded.addListener(refreshChecks);
+  chrome.permissions.onRemoved.addListener(refreshChecks);
 });
 
 onUnmounted(() => {
   chrome.storage.onChanged.removeListener(onStorageChanged);
   tabEvents.forEach((e) => chrome.tabs[e].removeListener(refreshTabs));
   clearInterval(ticker);
+  clearInterval(checkTicker);
+  chrome.permissions.onAdded.removeListener(refreshChecks);
+  chrome.permissions.onRemoved.removeListener(refreshChecks);
 });
 
 const tabUrl = (t) => t.url || t.pendingUrl || '';
@@ -107,8 +119,55 @@ const stats = computed(() => {
     const st = result[owner.id];
     if (st.nextCloseMs === null || remaining < st.nextCloseMs) st.nextCloseMs = remaining;
   }
+
+  // Page-check rules: split matching tabs by the latest check results.
+  for (const rule of s.rules) {
+    if (!hasCheck(rule)) continue;
+    const res = checkResults.value[rule.id] || {};
+    const st = result[rule.id];
+    st.check = { pass: [], fail: [], unreadable: {}, pending: 0 };
+    for (const tab of st.tabs) {
+      const r = res[tab.id];
+      if (!r) st.check.pending++;
+      else if (r.result === true) st.check.pass.push({ ...tab, match: r.match });
+      else if (r.result === false) st.check.fail.push(tab);
+      else st.check.unreadable[r.reason] = (st.check.unreadable[r.reason] || 0) + 1;
+    }
+  }
   return result;
 });
+
+// ---------- Page-check results (run by the background in matching tabs) ----------
+
+const checkResults = ref({}); // { [ruleId]: { [tabId]: { result: true|false|null, reason? } } }
+let checking = false;
+
+async function refreshChecks() {
+  if (checking || !settings.value) return;
+  checking = true;
+  try {
+    const next = {};
+    for (const rule of settings.value.rules) {
+      if (!hasCheck(rule)) continue;
+      const tabIds = tabs.value.filter((t) => ruleMatchesUrl(rule, tabUrl(t))).map((t) => t.id);
+      if (!tabIds.length) continue;
+      const res = await chrome.runtime
+        .sendMessage({ type: 'check-tabs', check: JSON.parse(JSON.stringify(rule.check)), tabIds })
+        .catch(() => null);
+      if (res?.ok) next[rule.id] = res.results;
+    }
+    checkResults.value = next;
+  } finally {
+    checking = false;
+  }
+}
+
+// Re-check when a check is edited (debounced).
+let checkEditTimer;
+watch(
+  () => JSON.stringify(settings.value?.rules.map((r) => [r.patterns, r.check])),
+  () => { clearTimeout(checkEditTimer); checkEditTimer = setTimeout(refreshChecks, 500); },
+);
 
 // ---------- Search ----------
 
@@ -150,27 +209,41 @@ function moveRule(index, delta) {
 }
 
 function restoreDefaults() {
-  if (confirm('Replace all rules with the default rules?')) settings.value.rules = structuredClone(DEFAULT_RULES);
+  if (confirm('Replace all rules with the default rules?')) settings.value.rules = defaultRules();
 }
 
-async function closeAll(rule) {
-  const matching = stats.value[rule.id]?.tabs || [];
-  await closeTabs(matching.map((tab) => ({ tab, reason: `${rule.title || 'Untitled rule'} (closed manually)` })));
-  refreshTabs();
-}
-
-async function flash(rule) {
-  const tabIds = (stats.value[rule.id]?.tabs || []).map((t) => t.id);
-  // Runs in the background worker so it completes even if the popup closes.
+/** Sends a message to the background worker; returns its response or null (status shows why). */
+async function toBackground(msg, what) {
   let res;
   try {
-    res = await chrome.runtime.sendMessage({ type: 'flash-tabs', tabIds });
+    res = await chrome.runtime.sendMessage(msg);
   } catch (e) {
     res = { ok: false, error: e.message };
   }
   if (!res) status.value = '⚠ Background is outdated — reload the extension in chrome://extensions';
-  else if (!res.ok) status.value = `⚠ Flash failed: ${res.error}`;
-  else if (!res.flashed) status.value = 'Nothing to flash (pinned tabs can’t be flashed)';
+  else if (!res.ok) status.value = `⚠ ${what} failed: ${res.error}`;
+  return res?.ok ? res : null;
+}
+
+async function closeAll(rule) {
+  await flushSave(); // the background reads the rule from storage
+  // Done in the background so rules with a page check only close tabs that pass it.
+  const res = await toBackground({ type: 'close-rule', ruleId: rule.id }, 'Close');
+  if (res) {
+    status.value = res.kept
+      ? `Closed ${res.closed}; kept ${res.kept} that didn’t pass the page check (or couldn’t be read)`
+      : `Closed ${res.closed}`;
+  }
+  refreshTabs();
+}
+
+async function flash(rule) {
+  const st = stats.value[rule.id];
+  // Page-check rules: only flash tabs that currently pass the check.
+  const tabIds = (st?.check ? st.check.pass : st?.tabs || []).map((t) => t.id);
+  // Runs in the background worker so it completes even if the popup closes.
+  const res = await toBackground({ type: 'flash-tabs', tabIds }, 'Flash');
+  if (res && !res.flashed) status.value = 'Nothing to flash (pinned tabs can’t be flashed)';
 }
 
 function reopen(entry) {
