@@ -75,6 +75,8 @@ export const DEFAULT_RULES = [
 export const DEFAULT_SETTINGS = {
   rules: DEFAULT_RULES.map(({ addedIn, ...r }) => r),
   defaultsVersion: DEFAULTS_VERSION,
+  // Catch-all: close tabs that no rule handles once inactive this long (off by default).
+  idleClose: { enabled: false, value: 1, unit: 'weeks' },
   skipPinned: true,   // never auto-close pinned tabs
   skipAudible: true,  // never auto-close tabs playing audio (e.g. a meeting in the browser)
 };
@@ -166,6 +168,49 @@ export function ruleMatchesUrl(rule, url) {
 /** First enabled rule matching the URL, or null. */
 export function findRule(rules, url) {
   return rules.find((r) => r.enabled && ruleMatchesUrl(r, url)) || null;
+}
+
+export const TIME_UNITS = { minutes: 60_000, hours: 3_600_000, days: 86_400_000, weeks: 604_800_000 };
+const UNIT_MINUTES = { minutes: 1, hours: 60, days: 1440, weeks: 10080 };
+
+/** Unit a rule's timeout is shown in: the saved choice, or the largest unit that divides it evenly. */
+export function timeoutUnit(rule) {
+  if (UNIT_MINUTES[rule.timeoutUnit]) return rule.timeoutUnit;
+  const m = Number(rule.timeoutMinutes);
+  return ['weeks', 'days', 'hours'].find((u) => m > 0 && m % UNIT_MINUTES[u] === 0) || 'minutes';
+}
+
+/** Rule timeout as a number in its display unit (rounded to 2 decimals). */
+export const timeoutValue = (rule) => Math.round((Number(rule.timeoutMinutes) / UNIT_MINUTES[timeoutUnit(rule)]) * 100) / 100;
+
+/** Sets a rule's timeout from a value in the given unit. */
+export function setRuleTimeout(rule, value, unit = timeoutUnit(rule)) {
+  rule.timeoutUnit = unit;
+  rule.timeoutMinutes = Number(value) * UNIT_MINUTES[unit];
+}
+
+/** "5 minutes", "1 week" … */
+export function fmtTimeout(value, unit) {
+  return `${value} ${Number(value) === 1 ? unit.replace(/s$/, '') : unit}`;
+}
+
+/** Catch-all inactivity timeout in ms, or Infinity when disabled/invalid. */
+export function idleCloseMs(settings) {
+  const c = settings.idleClose;
+  const n = Number(c?.value);
+  return c?.enabled && n > 0 ? n * (TIME_UNITS[c.unit] || TIME_UNITS.weeks) : Infinity;
+}
+
+/**
+ * Does a rule *without* a page check own this URL? Such tabs follow that rule's timeout and
+ * are never handled by the catch-all. (Rules with a page check only claim a tab when the
+ * check passes, so tabs failing it fall through to the catch-all.)
+ */
+export function ownedByPlainRule(rules, url) {
+  for (const r of rules) {
+    if (r.enabled && ruleMatchesUrl(r, url) && !hasCheck(r)) return true;
+  }
+  return false;
 }
 
 export function timeoutMs(rule) {

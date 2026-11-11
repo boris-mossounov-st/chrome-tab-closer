@@ -1,6 +1,6 @@
 import {
   loadSettings, saveSettings, hasStoredSettings, addNewDefaults,
-  ruleMatchesUrl, hasCheck, timeoutMs, closeTabs,
+  ruleMatchesUrl, hasCheck, timeoutMs, idleCloseMs, fmtTimeout, closeTabs,
 } from './common.js';
 
 // "Activity" = last time a tab was focused (active tab of the focused window)
@@ -50,18 +50,24 @@ async function refreshFocus() {
 }
 
 /**
- * Which rule (if any) closes this tab now. Enabled rules matching the URL are tried in order:
+ * Should this tab be closed now? Returns the reason (string) or null.
+ * Enabled rules matching the URL are tried in order:
  * - a rule without a page check owns the tab: it closes it once idle past its timeout,
- *   and later rules are not considered;
+ *   and nothing else (later rules, catch-all) is considered;
  * - a rule with a page check only claims the tab when it's idle past the timeout AND the
  *   page check passes; otherwise the next matching rule gets a chance.
+ * Tabs no rule claims fall back to the catch-all "close inactive tabs after ..." setting.
  */
-async function ruleToClose(rules, tab, url, idleMs) {
-  for (const rule of rules) {
+async function closeReason(settings, tab, url, idleMs) {
+  for (const rule of settings.rules) {
     if (!rule.enabled || !ruleMatchesUrl(rule, url)) continue;
     const due = idleMs >= timeoutMs(rule);
-    if (!hasCheck(rule)) return due ? rule : null;
-    if (due && await pageCheckPasses(tab, rule.check)) return rule;
+    if (!hasCheck(rule)) return due ? rule.title || 'Untitled rule' : null;
+    if (due && await pageCheckPasses(tab, rule.check)) return rule.title || 'Untitled rule';
+  }
+  if (idleMs >= idleCloseMs(settings)) {
+    const { value, unit } = settings.idleClose;
+    return `Inactive for ${fmtTimeout(value, unit)}`;
   }
   return null;
 }
@@ -155,8 +161,9 @@ async function sweep() {
   for (const tab of tabs) {
     live.add(String(tab.id));
     if (activity[tab.id] == null) {
-      activity[tab.id] = now; // first time we see it: start its timer now
-      continue;
+      // First time we see it (e.g. after a browser restart): start from when Chrome says the
+      // tab was last used, so long timeouts survive restarts.
+      activity[tab.id] = Math.min(now, tab.lastAccessed || now);
     }
     if (tab.id === current) continue;
     if (settings.skipPinned && tab.pinned) continue;
@@ -164,8 +171,8 @@ async function sweep() {
 
     const url = tab.url || tab.pendingUrl;
     if (!url) continue;
-    const rule = await ruleToClose(settings.rules, tab, url, now - activity[tab.id]);
-    if (rule) toClose.push({ tab, reason: rule.title || 'Untitled rule' });
+    const reason = await closeReason(settings, tab, url, now - activity[tab.id]);
+    if (reason) toClose.push({ tab, reason });
   }
 
   // Forget tabs that no longer exist.
@@ -197,7 +204,8 @@ chrome.windows.onFocusChanged.addListener(async () => {
 
 chrome.tabs.onCreated.addListener(async (tab) => {
   await ready;
-  activity[tab.id] = Date.now();
+  // Restored tabs (browser restart, reopen closed tab) keep their last-used time.
+  activity[tab.id] = Math.min(Date.now(), tab.lastAccessed || Date.now());
   await persist();
 });
 

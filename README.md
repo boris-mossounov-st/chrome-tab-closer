@@ -36,7 +36,7 @@ Each rule has:
 - **Patterns**, one per line:
   - `/regex/` (optional flags, e.g. `/zoom\.us/i`) is tested against the full URL
   - anything else must equal the URL exactly
-- **Timeout** in minutes of inactivity
+- **Timeout**: how long the tab must be inactive, in minutes, hours, days or weeks
 - An **on/off** switch
 - An optional **page check** (see below)
 
@@ -72,7 +72,13 @@ Default rules that use page checks:
 - About every 30 seconds, each tab is matched against the rules. The first enabled matching rule without a page check decides the timeout. A rule with a page check applies only when its check passes.
 - The tab you're looking at is never closed. If you switch to another app (for example, the Zoom app opens), the timer starts.
 - Pinned tabs and tabs playing audio are skipped by default.
-- If the browser restarts, all timers start over.
+- **Catch-all** (off by default; the checkbox in the sticky header): closes all inactive unprotected tabs after a set time, 1 week by default. "Unprotected" means:
+  - no rule without a page check handles the tab;
+  - it isn't pinned or playing audio (if those options are on);
+  - it isn't the tab you're looking at.
+
+  The header shows how many tabs it would close right now, and you're asked to confirm when turning it on would close any.
+- Timers start from Chrome's record of when each tab was last used, so long timeouts carry over across browser restarts. When the extension is reloaded or updated, timers also restart from that record, so a tab that has already been inactive past its timeout can close right away.
 
 ## Layout
 

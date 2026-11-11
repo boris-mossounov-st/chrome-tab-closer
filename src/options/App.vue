@@ -3,6 +3,7 @@ import { ref, computed, watch, nextTick, onMounted, onUnmounted } from 'vue';
 import RuleCard from './RuleCard.vue';
 import {
   defaultRules, loadSettings, saveSettings, findRule, ruleMatchesUrl, timeoutMs, newId, hasCheck,
+  ownedByPlainRule, TIME_UNITS, timeoutUnit, timeoutValue, fmtTimeout,
 } from '../common.js';
 
 defineProps({ isPopup: Boolean });
@@ -137,6 +138,35 @@ const stats = computed(() => {
   return result;
 });
 
+// ---------- Catch-all: close inactive tabs no rule handles ----------
+
+/** Tabs the catch-all would close right now with the current value (whether enabled or not). */
+const idleCandidates = computed(() => {
+  const s = settings.value;
+  if (!s) return [];
+  const ms = Number(s.idleClose.value) * (TIME_UNITS[s.idleClose.unit] || TIME_UNITS.weeks);
+  if (!(ms > 0)) return [];
+  return tabs.value.filter((tab) => {
+    if (tab.id === focusedTabId.value) return false;
+    if (s.skipPinned && tab.pinned) return false;
+    if (s.skipAudible && tab.audible) return false;
+    if (ownedByPlainRule(s.rules, tabUrl(tab))) return false;
+    const last = activity.value[tab.id] ?? tab.lastAccessed;
+    return last != null && now.value - last >= ms;
+  });
+});
+
+function toggleIdleClose(event) {
+  const n = idleCandidates.value.length;
+  const { value, unit } = settings.value.idleClose;
+  if (event.target.checked && n
+    && !confirm(`${n} tab${n === 1 ? ' has' : 's have'} been inactive for more than ${fmtTimeout(value, unit)} and will be closed within a minute. Continue?`)) {
+    event.target.checked = false;
+    return;
+  }
+  settings.value.idleClose.enabled = event.target.checked;
+}
+
 // ---------- Page-check results (run by the background in matching tabs) ----------
 
 const checkResults = ref({}); // { [ruleId]: { [tabId]: { result: true|false|null, reason? } } }
@@ -188,7 +218,7 @@ const visibleRules = computed(() => {
 
 async function addRule() {
   search.value = ''; // make sure the new rule is visible
-  settings.value.rules.push({ id: newId(), enabled: true, title: '', patterns: [''], timeoutMinutes: 10 });
+  settings.value.rules.push({ id: newId(), enabled: true, title: '', patterns: [''], timeoutMinutes: 10, timeoutUnit: 'minutes' });
   await nextTick();
   const cards = rulesEl.value?.querySelectorAll('article');
   const card = cards?.[cards.length - 1];
@@ -260,7 +290,7 @@ const testResult = computed(() => {
   if (!url || !settings.value) return '';
   const rule = findRule(settings.value.rules, url);
   return rule
-    ? `✓ Matches “${rule.title || 'Untitled rule'}” — closes after ${rule.timeoutMinutes} min of inactivity.`
+    ? `✓ Matches “${rule.title || 'Untitled rule'}” — closes after ${fmtTimeout(timeoutValue(rule), timeoutUnit(rule))} of inactivity.`
     : '✗ No enabled rule matches this URL.';
 });
 
@@ -307,6 +337,40 @@ const fmtTime = (t) => new Date(t).toLocaleString();
         <button class="btn whitespace-nowrap" title="Replace all rules with the defaults" @click="restoreDefaults">
           Restore defaults
         </button>
+      </div>
+      <div
+        class="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1"
+        title="Applies to tabs no rule handles. Pinned tabs, tabs playing audio (see options below) and the tab you're looking at are never closed."
+      >
+        <label class="flex items-center gap-2">
+          <input
+            :checked="settings.idleClose.enabled"
+            type="checkbox"
+            class="size-4 accent-blue-600"
+            @change="toggleIdleClose"
+          >
+          Close all inactive unprotected tabs after
+        </label>
+        <input
+          v-model.number="settings.idleClose.value"
+          type="number"
+          min="1"
+          class="field w-16 text-right"
+        >
+        <select v-model="settings.idleClose.unit" class="field">
+          <option value="minutes">minutes</option>
+          <option value="hours">hours</option>
+          <option value="days">days</option>
+          <option value="weeks">weeks</option>
+        </select>
+        <span
+          v-if="idleCandidates.length"
+          class="text-xs"
+          :class="settings.idleClose.enabled ? 'text-amber-700 dark:text-amber-300' : 'hint'"
+          :title="idleCandidates.map((t) => t.title || t.url).join('\n')"
+        >
+          {{ idleCandidates.length }} {{ settings.idleClose.enabled ? 'closing now' : 'would close now' }}
+        </span>
       </div>
     </header>
 

@@ -1,6 +1,8 @@
 <script setup>
 import { computed, ref, watch, onMounted, onUnmounted } from 'vue';
-import { ruleErrors, hasCheck, parseSites, siteOrigins, hostCovered } from '../common.js';
+import {
+  ruleErrors, hasCheck, parseSites, siteOrigins, hostCovered, timeoutUnit, timeoutValue, setRuleTimeout,
+} from '../common.js';
 
 const props = defineProps({
   rule: { type: Object, required: true },
@@ -19,6 +21,16 @@ const patternsText = computed({
 const count = computed(() => props.stats?.tabs.length ?? 0);
 const rows = computed(() => Math.min(6, Math.max(2, (props.rule.patterns || []).length)));
 const checked = computed(() => hasCheck(props.rule));
+
+// Timeout shown as value + unit; stored as timeoutMinutes (+ timeoutUnit for display).
+const timeoutNum = computed({
+  get: () => timeoutValue(props.rule),
+  set: (v) => setRuleTimeout(props.rule, v),
+});
+const unit = computed({
+  get: () => timeoutUnit(props.rule),
+  set: (u) => setRuleTimeout(props.rule, timeoutValue(props.rule), u), // keep the number, change the unit
+});
 /** Tabs Flash/Close act on: all matching tabs, or only those passing the page check. */
 const actionable = computed(() => (props.stats?.check ? props.stats.check.pass.length : count.value));
 
@@ -120,10 +132,15 @@ function fmtDuration(ms) {
         placeholder="Rule title"
         class="field min-w-0 flex-1 font-semibold"
       >
-      <label class="flex items-center gap-1 whitespace-nowrap hint" title="Close after this many minutes of inactivity">
-        <input v-model.number="rule.timeoutMinutes" type="number" min="0.5" step="0.5" class="field w-16 text-right">
-        min
-      </label>
+      <span class="flex items-center gap-1" title="Close after this long without being used">
+        <input v-model.number="timeoutNum" type="number" min="0" step="any" class="field w-14 text-right">
+        <select v-model="unit" class="field">
+          <option value="minutes">min</option>
+          <option value="hours">hours</option>
+          <option value="days">days</option>
+          <option value="weeks">weeks</option>
+        </select>
+      </span>
       <span class="flex">
         <button class="btn-icon" :disabled="first" title="Move up" @click="$emit('move', -1)">↑</button>
         <button class="btn-icon" :disabled="last" title="Move down" @click="$emit('move', 1)">↓</button>
